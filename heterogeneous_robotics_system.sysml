@@ -2,7 +2,7 @@ package MixedFleet {
     private import ScalarValues::*;
     // Base vehicle definition
 
-    requirement def <'1'> ScanWarehouseRequirement{
+    requirement ScanWarehouseRequirement{
         private import ISQ::*;
         private import SI::*;
 	    private import NumericalFunctions::*;
@@ -10,12 +10,37 @@ package MixedFleet {
     
         subject drone : Drone;
     
-        attribute scanRange : LengthValue = drone.scanRange;
+        attribute scanRange :> ISQ::length ;
     
-    
-        assume constraint {
+        require constraint {
             drone.scanRange > 3[m] // Ensure the drone has a valid scanning range 
         }
+    }
+
+    verification def ScanWarehouseTest{
+        private import VerificationCases::*;
+        subject testDrone : Drone;
+        objective scanWarehouseVerificationObjective {
+            verify ScanWarehouseRequirement ;
+        }
+        action collectData {
+            in part testDrone : Drone = ScanWarehouseTest::testDrone;
+            out effectiveScanRangeMeasured :> ISQ::length;
+        }
+        action processData {
+            in scanRangeMeasured :> ISQ::length = collectData.effectiveScanRangeMeasured;
+            out scanRangeProcessed :> ISQ::length;
+        }
+
+        action evaluateData {
+            in scanRangeProcessed :> ISQ::length = processData.scanRangeProcessed;
+            out verdict : VerdictKind =
+            PassIf(ScanWarehouseRequirement(
+                drone = testDrone,
+                scanRange = scanRangeProcessed
+            ));
+        }
+        return verdict : VerdictKind = evaluateData.verdict;
     }
     
     part def Vehicle {
@@ -23,17 +48,17 @@ package MixedFleet {
         attribute position : Coordinate;
         attribute autonomyLevel: Real;
         port platformMessage : MessagePort;
+        port sensorsData : MessagePort;
     }
 
     // Automated Guided Vehicle (AGV/UGV)
     part def UGV specializes Vehicle {
         attribute maxLoad : ISQ::MassValue[*];
-        action movePallet : MovePallet;
+        action movePallet : MoveObject;
     }
     // Drone with scanning capabilities
     part def Drone specializes Vehicle {
         attribute scanRange : ISQ::LengthValue[*];
-        port sensorsData : MessagePort;
 
         action scanWarehouse : ScanWarehouse;
     }
@@ -43,8 +68,8 @@ package MixedFleet {
         attribute liftingCapacity : ISQ::MassValue;
         attribute forkHeight : ISQ::LengthValue[*];
 
-        action confirmPickup : ConfirmPickup;
         action placePallet : PlacePallet;
+        action pickupPallet : MoveObject;
     }
     
 
@@ -57,26 +82,25 @@ package MixedFleet {
         }
 
         // Action for AGV moving the pallet to the collection point
-        action def MovePallet {
-            in ugv: UGV;
-            in palletLocation: Coordinate;
+        action def MoveObject {
+            in vehicle: Vehicle;
+            in source: Coordinate;
             in destination: Coordinate;
             out completed: Boolean;
+            out placedLocation:Boolean;
             out timeoutOccurred: Boolean;
         }
 
-        // Action for Forklift confirming it has picked up the pallet
-        action def ConfirmPickup {
-            in vehicle: Vehicle; 
-            in palletLocation: Coordinate;
-            out pickupConfirmed: Boolean;
+        action def ReassignVehicle{
+            //in availableVehicles: Vehicle[0..*];
+            out vehicle: Vehicle;
         }
 
-        // Action for Forklift placing the pallet on the free rack
+        // Action for Forklift confirming it has picked up the pallet
         action def PlacePallet {
-            in forklift: Forklift;
-            in rackLocation: Coordinate;
-            out completed: Boolean;
+            in forklift: Forklift; 
+            in RackLocation: Coordinate;
+            out pickupConfirmed: Boolean;
         }
 
         action def MovingItemMission {
@@ -92,6 +116,7 @@ package MixedFleet {
             in drone:Drone;
             in forklift:Forklift;
             in palletLocation: Coordinate;
+            
 
             first start;
 
@@ -102,25 +127,29 @@ package MixedFleet {
                 out emptyRackLocation;
             } 
             // UGV moves the pallet to the collection point
-            then action movePallet : MovePallet {
+            then action movePallet : MoveObject {
                 in ugv: moveItemMission.ugv;
-                in palletLocation = moveItemMission.palletLocation;
+                in source = moveItemMission.palletLocation;
                 in destination = scanWarehouse.emptyRackLocation;
+                out timeoutOccurred;
+                out placedLocation;
                 out completed;
             }
             // Decision: If movePallet fails, reassign task
             then decide;
-            if movePallet.timeoutOccurred then reassignMove;
-            else confirmPickup;
+            if movePallet.timeoutOccurred then reassignVehicle;
+            else pickupPallet;
             // Forklift confirms pickup
-            then action confirmPickup: ConfirmPickup{
+            then action pickupPallet: MoveObject{
                 in vehicle: moveItemMission.forklift; 
                 in palletLocation = moveItemMission.palletLocation;
-                out pickupConfirmed;
+                in destination: movePallet.placedLocation;
+                out completed: Boolean;
+                out timeoutOccurred: Boolean;
             } 
             // Decision: If the pickup is **not confirmed**, reattempt scanning
             then decide;
-            if confirmPickup.pickupConfirmed then placePallet;
+            if pickupPallet.completed then placePallet;
 			else restartScan;
             // Forklift places the pallet
             action placePallet:PlacePallet{
@@ -130,22 +159,12 @@ package MixedFleet {
             }
             // Decision: If placement **fails**, reassign or restart scan process
             then decide;
-            if placePallet.timeoutOccurred == true then reassignPlace;
+            if placePallet.timeoutOccurred == true then reassignVehicle;
             //if placePallet.completed == true then reassignPlace ;
             else restartScan;
 
-            // Task reassignment logic
-            action reassignMove : MovePallet {
-                in ugv: UGV;
-                in palletLocation = moveItemMission.palletLocation;
-                in destination = scanWarehouse.emptyRackLocation;
-                out completed;
-            }
-
-            action reassignPlace : PlacePallet {
-                in forklift: Forklift;
-                in rackLocation: scanWarehouse.emptyRackLocation;
-                out completed;
+            action reassignVehicle : ReassignVehicle {
+                out vehicle:Vehicle;
             }
 
         }
@@ -170,5 +189,7 @@ package MixedFleet {
         in item request : MxfMessage;
         out item  response : MxfMessage;
     }
+
+    
 
 }
